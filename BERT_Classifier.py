@@ -5,6 +5,7 @@ Created on Mon Jul 10 23:19:23 2023
 @author: descobarsalce
 """
 
+import pandas as pd
 import tensorflow as tf
 import tensorflow_addons as tfa
 from transformers import BertTokenizer
@@ -16,13 +17,8 @@ import numpy as np
 import regex as re
 import matplotlib.pyplot as plt
 
-
-class ClassifierBERT:
-    """
-    ClassifierBERT class for training and evaluating a BERT-based text classification model.
-    """
-
-    def __init__(self, labeled, text_varname, labels_varname, model='bert-base-uncased'):
+class StringPreprocessing:
+    def __init__(self, model='bert-base-uncased'):
         """
         Initialize the ClassifierBERT object.
 
@@ -33,13 +29,8 @@ class ClassifierBERT:
             model (str, optional): Pretrained BERT model to use. Defaults to 'bert-base-uncased'.
         """
         self.tokenizer = BertTokenizer.from_pretrained(model, do_lower_case=True)
-        self.model = TFBertForSequenceClassification.from_pretrained(model)
-        self.labeled_data = labeled
-        self.text_varname = text_varname
-        self.labels_varname = labels_varname
-        self.history = None
 
-    def tokenize(self, df, col_name, unlabeled=False):
+    def tokenize(self, df, col_name):
         """
         Tokenize the text data using the BERT tokenizer.
 
@@ -60,11 +51,64 @@ class ClassifierBERT:
                                                   return_tensors='tf')
         input_ids = tf.constant(tokens['input_ids'])
         attention_masks = tf.constant(tokens['attention_mask'])
-        labels = None
-        if not unlabeled:
-            labels = tf.constant(df[self.labels_varname].tolist())
-        return input_ids, attention_masks, labels
+        
+        return input_ids, attention_masks
+    
+    @staticmethod
+    def clean_string(string):
+        """
+        Clean a string by applying various text transformations.
 
+        Args:
+            string (str): The input string to clean.
+
+        Returns:
+            str: The cleaned string.
+        """
+        string = str(string)
+        string = string.encode("ascii", errors="ignore").decode()
+        string = string.lower()
+        chars_to_remove = [")", "(", ".", "|", "[", "]", "{", "}", "'"]
+        rx = '[' + re.escape(''.join(chars_to_remove)) + ']'
+        string = re.sub(rx, '', string)
+        string = string.replace('&', 'and')
+        string = string.replace(',', ' ')
+        string = string.replace('-', ' ')
+        string = re.sub(' +', ' ', string).strip()
+        string = ' ' + string + ' '
+        string = re.sub(r'[,-./]|\sBD', r'', string)
+        string = re.sub('\s+', ' ', string)
+        return string
+
+class ClassifierBERT:
+    """
+    ClassifierBERT class for training and evaluating a BERT-based text classification model.
+    """
+    def __init__(self, labeled, text_varname, labels_varname, model='bert-base-uncased'):
+        """
+        Initialize the ClassifierBERT object.
+
+        Args:
+            labeled (DataFrame): Labeled data for training the model.
+            text_varname (str): Name of the column containing the text data.
+            labels_varname (str): Name of the column containing the labels.
+            model (str, optional): Pretrained BERT model to use. Defaults to 'bert-base-uncased'.
+        """
+        try:
+            assert isinstance(labeled, pd.DataFrame), "labeled must be a DataFrame."
+            assert isinstance(text_varname, str), "text_varname must be a string."
+            assert isinstance(labels_varname, str), "labels_varname must be a string."
+        except AssertionError as e:
+            print(f"Error during initialization: {e}")
+            return
+        self.TextPreprocessor = StringPreprocessing()
+        self.model = TFBertForSequenceClassification.from_pretrained(model)
+        self.labeled_data = labeled
+        self.text_varname = text_varname
+        self.labels_varname = labels_varname
+        self.history = None
+
+    
     def compile_model(self, metric='accuracy'):
         """
         Compile the BERT model with the specified metric.
@@ -129,9 +173,18 @@ class ClassifierBERT:
         train_df, val_df, test_df = self.train_tst_val_split(train_size=train_size, test_size=test_size,
                                                              val_size=val_size, random_state=seed)
         self.compile_model(metric=metric)
-        input_ids_tr, attention_masks_tr, labels_tr = self.tokenize(train_df, self.text_varname)
-        input_ids_val, attention_masks_val, labels_val = self.tokenize(val_df, self.text_varname)
-        input_ids_test, attention_masks_test, labels_test = self.tokenize(test_df, self.text_varname)
+        
+        # Transform datasets into correct format:
+        datasets = [train_df, val_df, test_df]
+        results = []
+        for dataset in datasets:
+            input_ids, attention_masks = self.TextPreprocessor.tokenize(dataset, self.text_varname)
+            labels = tf.constant(dataset[self.labels_varname].tolist())
+            results.append((input_ids, attention_masks, labels))        
+        input_ids_tr, attention_masks_tr, labels_tr = results[0]
+        input_ids_val, attention_masks_val, labels_val = results[1]
+        input_ids_test, attention_masks_test, labels_test = results[2]
+
         self.history = self.model.fit(x=(input_ids_tr, attention_masks_tr),
                                        y=labels_tr,
                                        epochs=epochs,
@@ -185,8 +238,7 @@ class ClassifierBERT:
         Returns:
             tuple: Tuple containing the predicted probabilities and labels (if not unlabeled).
         """
-        input_ids_unlab, attention_masks_unlab, labels_unlab = self.tokenize(unlabeled_df, unlabeled_text_varname,
-                                                                             unlabeled)
+        input_ids_unlab, attention_masks_unlab, labels_unlab = self.TextPreprocessor.tokenize(unlabeled_df, unlabeled_text_varname)
         predictions_unlab = self.model.predict(input_ids_unlab)
         return predictions_unlab, np.argmax(predictions_unlab.logits, axis=1)
 
@@ -213,28 +265,4 @@ class ClassifierBERT:
         plt.legend()
         plt.show()
 
-    @staticmethod
-    def clean_string(string):
-        """
-        Clean a string by applying various text transformations.
 
-        Args:
-            string (str): The input string to clean.
-
-        Returns:
-            str: The cleaned string.
-        """
-        string = str(string)
-        string = string.encode("ascii", errors="ignore").decode()
-        string = string.lower()
-        chars_to_remove = [")", "(", ".", "|", "[", "]", "{", "}", "'"]
-        rx = '[' + re.escape(''.join(chars_to_remove)) + ']'
-        string = re.sub(rx, '', string)
-        string = string.replace('&', 'and')
-        string = string.replace(',', ' ')
-        string = string.replace('-', ' ')
-        string = re.sub(' +', ' ', string).strip()
-        string = ' ' + string + ' '
-        string = re.sub(r'[,-./]|\sBD', r'', string)
-        string = re.sub('\s+', ' ', string)
-        return string
